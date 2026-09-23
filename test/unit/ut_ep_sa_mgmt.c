@@ -4,6 +4,184 @@
 #include "sa_interface.h"
 #include "utest.h"
 
+#include <string.h>
+
+static int32_t setup_sa_create_test(uint16_t target_spi, SecurityAssociation_t **target_sa)
+{
+    remove("sa_save_file.bin");
+
+    Crypto_Config_CryptoLib(KEY_TYPE_INTERNAL, MC_TYPE_INTERNAL, SA_TYPE_INMEMORY, CRYPTOGRAPHY_TYPE_LIBGCRYPT,
+                            IV_INTERNAL);
+    Crypto_Config_TC(CRYPTO_TC_CREATE_FECF_TRUE, TC_PROCESS_SDLS_PDUS_TRUE, TC_HAS_PUS_HDR,
+                     TC_IGNORE_ANTI_REPLAY_FALSE, TC_IGNORE_SA_STATE_FALSE, TC_UNIQUE_SA_PER_MAP_ID_FALSE,
+                     TC_CHECK_FECF_TRUE, 0x3F, SA_INCREMENT_NONTRANSMITTED_IV_TRUE);
+
+    TCGvcidManagedParameters_t managed_parameters = {0, 0x0003, 0, TC_NO_FECF, TC_HAS_SEGMENT_HDRS, 1024, 1};
+    Crypto_Config_Add_TC_Gvcid_Managed_Parameters(managed_parameters);
+
+    int32_t status = Crypto_Init();
+    if (status != CRYPTO_LIB_SUCCESS)
+    {
+        return status;
+    }
+
+    SaInterface sa_if = get_sa_interface_inmemory();
+    status            = sa_if->sa_get_from_spi(target_spi, target_sa);
+    if (status != CRYPTO_LIB_SUCCESS)
+    {
+        Crypto_Shutdown();
+        return status;
+    }
+
+    (*target_sa)->sa_state  = SA_NONE;
+    (*target_sa)->lpid      = 0xA5;
+    (*target_sa)->est       = 0;
+    (*target_sa)->ast       = 0;
+    (*target_sa)->shivf_len = 0;
+    (*target_sa)->iv_len    = 0;
+    (*target_sa)->ecs_len   = 0;
+    (*target_sa)->ecs       = 0;
+    (*target_sa)->acs_len   = 0;
+    (*target_sa)->acs       = 0;
+    (*target_sa)->abm_len   = 0;
+    (*target_sa)->arsn_len  = 0;
+    (*target_sa)->arsnw_len = 0;
+    (*target_sa)->arsnw     = 0;
+    memset((*target_sa)->iv, 0, sizeof((*target_sa)->iv));
+
+    memset(&sdls_frame.tlv_pdu, 0, sizeof(sdls_frame.tlv_pdu));
+    sdls_frame.tlv_pdu.hdr.type = PDU_TYPE_COMMAND;
+    sdls_frame.tlv_pdu.hdr.uf   = PDU_USER_FLAG_FALSE;
+    sdls_frame.tlv_pdu.hdr.sg   = SG_SA_MGMT;
+    sdls_frame.tlv_pdu.hdr.pid  = PID_CREATE_SA;
+    sdls_frame.tlv_pdu.data[0]  = (uint8_t)(target_spi >> BYTE_LEN);
+    sdls_frame.tlv_pdu.data[1]  = (uint8_t)(target_spi & 0xFF);
+
+    return CRYPTO_LIB_SUCCESS;
+}
+
+UTEST(EP_SA_MGMT, SA_CREATE_PRESERVES_IV_LENGTHS)
+{
+    const uint16_t target_spi = NUM_SA - 1;
+    SecurityAssociation_t *target_sa = NULL;
+
+    int32_t status = setup_sa_create_test(target_spi, &target_sa);
+    ASSERT_EQ(CRYPTO_LIB_SUCCESS, status);
+
+    uint16_t count                    = 2;
+    sdls_frame.tlv_pdu.data[count++] = 0x80 | 6;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 1;
+    sdls_frame.tlv_pdu.data[count++] = CRYPTO_CIPHER_AES256_GCM;
+    sdls_frame.tlv_pdu.data[count++] = 12;
+
+    for (uint8_t i = 0; i < 12; i++)
+    {
+        sdls_frame.tlv_pdu.data[count++] = (uint8_t)(i + 1);
+    }
+
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.hdr.pdu_len  = count * BYTE_LEN;
+
+    TC_t tc_frame                = {0};
+    tc_frame.tc_sec_header.spi   = 0;
+    status                       = Crypto_PDU(NULL, &tc_frame);
+
+    ASSERT_EQ(CRYPTO_LIB_SUCCESS, status);
+    ASSERT_EQ(SA_UNKEYED, target_sa->sa_state);
+    ASSERT_EQ(6, target_sa->shivf_len);
+    ASSERT_EQ(12, target_sa->iv_len);
+    ASSERT_EQ(CRYPTO_CIPHER_AES256_GCM, target_sa->ecs);
+
+    for (uint8_t i = 0; i < 12; i++)
+    {
+        ASSERT_EQ((uint8_t)(i + 1), target_sa->iv[i]);
+    }
+
+    Crypto_Shutdown();
+}
+
+UTEST(EP_SA_MGMT, SA_CREATE_REJECTS_IV_FIELD_WIDER_THAN_FULL_IV)
+{
+    const uint16_t target_spi = NUM_SA - 1;
+    SecurityAssociation_t *target_sa = NULL;
+
+    int32_t status = setup_sa_create_test(target_spi, &target_sa);
+    ASSERT_EQ(CRYPTO_LIB_SUCCESS, status);
+
+    target_sa->iv[0] = 0x5A;
+
+    uint16_t count                    = 2;
+    sdls_frame.tlv_pdu.data[count++] = 0x80 | 12;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 1;
+    sdls_frame.tlv_pdu.data[count++] = CRYPTO_CIPHER_AES256_GCM;
+    sdls_frame.tlv_pdu.data[count++] = 1;
+    sdls_frame.tlv_pdu.data[count++] = 0x57;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.hdr.pdu_len  = count * BYTE_LEN;
+
+    TC_t tc_frame              = {0};
+    tc_frame.tc_sec_header.spi = 0;
+    status                     = Crypto_PDU(NULL, &tc_frame);
+
+    ASSERT_EQ(CRYPTO_LIB_ERR_INVALID_SA_IV_CONFIG, status);
+    ASSERT_EQ(SA_NONE, target_sa->sa_state);
+    ASSERT_EQ(0xA5, target_sa->lpid);
+    ASSERT_EQ(0, target_sa->shivf_len);
+    ASSERT_EQ(0, target_sa->iv_len);
+    ASSERT_EQ(0x5A, target_sa->iv[0]);
+
+    Crypto_Shutdown();
+}
+
+UTEST(EP_SA_MGMT, SA_CREATE_REJECTS_TRUNCATED_IV)
+{
+    const uint16_t target_spi = NUM_SA - 1;
+    SecurityAssociation_t *target_sa = NULL;
+
+    int32_t status = setup_sa_create_test(target_spi, &target_sa);
+    ASSERT_EQ(CRYPTO_LIB_SUCCESS, status);
+
+    target_sa->iv[0] = 0x5A;
+
+    uint16_t count                    = 2;
+    sdls_frame.tlv_pdu.data[count++] = 0x80 | 6;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 0;
+    sdls_frame.tlv_pdu.data[count++] = 1;
+    sdls_frame.tlv_pdu.data[count++] = CRYPTO_CIPHER_AES256_GCM;
+    sdls_frame.tlv_pdu.data[count++] = 12;
+    sdls_frame.tlv_pdu.data[count++] = 0x01;
+    sdls_frame.tlv_pdu.data[count++] = 0x02;
+    sdls_frame.tlv_pdu.data[count++] = 0x03;
+    sdls_frame.tlv_pdu.data[count++] = 0x04;
+    sdls_frame.tlv_pdu.hdr.pdu_len  = count * BYTE_LEN;
+
+    TC_t tc_frame              = {0};
+    tc_frame.tc_sec_header.spi = 0;
+    status                     = Crypto_PDU(NULL, &tc_frame);
+
+    ASSERT_EQ(CRYPTO_LIB_ERR_BAD_TLV_LENGTH, status);
+    ASSERT_EQ(SA_NONE, target_sa->sa_state);
+    ASSERT_EQ(0xA5, target_sa->lpid);
+    ASSERT_EQ(0, target_sa->shivf_len);
+    ASSERT_EQ(0, target_sa->iv_len);
+    ASSERT_EQ(0x5A, target_sa->iv[0]);
+
+    Crypto_Shutdown();
+}
+
 UTEST(EP_SA_MGMT, SA_6_REKEY_133)
 {
     remove("sa_save_file.bin");

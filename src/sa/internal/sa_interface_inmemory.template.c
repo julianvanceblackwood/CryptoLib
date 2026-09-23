@@ -1443,6 +1443,34 @@ static int32_t sa_create(TC_t *tc_frame)
     // Check if valid SPI
     if (spi < NUM_SA)
     {
+        const uint16_t pdu_data_len = sdls_frame.tlv_pdu.hdr.pdu_len / BYTE_LEN;
+
+        if (pdu_data_len < 6U)
+        {
+            return CRYPTO_LIB_ERR_BAD_TLV_LENGTH;
+        }
+
+        const uint8_t  transmitted_iv_len = (uint8_t)sdls_frame.tlv_pdu.data[2] & 0x3F;
+        const uint8_t  ecs_len            = (uint8_t)sdls_frame.tlv_pdu.data[5];
+        const uint16_t iv_len_index       = (uint16_t)(6U + ecs_len);
+
+        if (iv_len_index >= pdu_data_len)
+        {
+            return CRYPTO_LIB_ERR_BAD_TLV_LENGTH;
+        }
+
+        const uint8_t iv_len = (uint8_t)sdls_frame.tlv_pdu.data[iv_len_index];
+
+        if (iv_len > IV_SIZE || transmitted_iv_len > iv_len)
+        {
+            return CRYPTO_LIB_ERR_INVALID_SA_IV_CONFIG;
+        }
+
+        if ((uint32_t)iv_len_index + 1U + iv_len > pdu_data_len)
+        {
+            return CRYPTO_LIB_ERR_BAD_TLV_LENGTH;
+        }
+
         SecurityAssociation_t *temp_sa;
         sa_if->sa_get_from_spi(spi, &temp_sa);
         // Overwrite last PID : 8 bits
@@ -1466,8 +1494,8 @@ static int32_t sa_create(TC_t *tc_frame)
         {
             temp_sa->ecs = ((uint8_t)sdls_frame.tlv_pdu.data[count++]);
         }
-        temp_sa->shivf_len = ((uint8_t)sdls_frame.tlv_pdu.data[count++]);
-        for (x = 0; x < temp_sa->shivf_len; x++)
+        temp_sa->iv_len = ((uint8_t)sdls_frame.tlv_pdu.data[count++]);
+        for (x = 0; x < temp_sa->iv_len; x++)
         {
             temp_sa->iv[x] = ((uint8_t)sdls_frame.tlv_pdu.data[count++]);
         }
@@ -1512,7 +1540,8 @@ static int32_t sa_create(TC_t *tc_frame)
             sa[spi].stmacf_len = temp_sa->stmacf_len;
             sa[spi].ecs_len    = temp_sa->ecs_len;
             sa[spi].ecs        = temp_sa->ecs;
-            for (x = 0; x < sa[spi].shivf_len; x++)
+            sa[spi].iv_len     = temp_sa->iv_len;
+            for (x = 0; x < sa[spi].iv_len; x++)
             {
                 sa[spi].iv[x] = temp_sa->iv[x];
             }
@@ -1825,6 +1854,10 @@ int32_t sa_verify_data(SecurityAssociation_t *sa_ptr)
     if (sa_ptr->shivf_len > IV_SIZE)
     {
         status = CRYPTO_LIB_ERR_SHIVF_LEN_GREATER_THAN_MAX_IV_SIZE;
+    }
+    else if (sa_ptr->iv_len > IV_SIZE || sa_ptr->shivf_len > sa_ptr->iv_len)
+    {
+        status = CRYPTO_LIB_ERR_INVALID_SA_IV_CONFIG;
     }
     if (sa_ptr->shsnf_len > ARSN_SIZE)
     {
